@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { init, compare, applyRandomTests, Doc } from './testHelper.js' // eslint-disable-line
 
 import * as Y from '../src/index.js'
@@ -494,6 +495,244 @@ export const testUndoXmlBug = tc => {
   undoManager.redo()
   undoManager.redo()
   t.compare(fragment.toString(), '<test-node a="180" b="50"></test-node>')
+}
+
+/**
+ * 
+ * @param {any} param0 
+ * @returns {number}
+ */
+function getInsertLength({ insert }) {
+  return typeof insert === 'string' ? insert.length : 1;
+}
+
+/**
+ * 
+ * @param {any} delta 
+ * @param {number} start
+ * @param {number} length 
+ * @returns {any}
+ */
+function sliceInsertDelta(
+  delta,
+  start,
+  length
+) {
+  if (length < 1) {
+    return [];
+  }
+
+  let currentOffset = 0;
+  const sliced = [];
+  const end = start + length;
+
+  for (let i = 0; i < delta.length; i++) {
+    if (currentOffset >= end) {
+      break;
+    }
+
+    const element = delta[i];
+    const elementLength = getInsertLength(element);
+
+    if (currentOffset + elementLength <= start) {
+      currentOffset += elementLength;
+      continue;
+    }
+
+    if (typeof element.insert !== 'string') {
+      currentOffset += elementLength;
+      sliced.push(element);
+      continue;
+    }
+
+    const startOffset = Math.max(0, start - currentOffset);
+    const endOffset = Math.min(
+      elementLength,
+      elementLength - (currentOffset + elementLength - end)
+    );
+
+    sliced.push({
+      ...element,
+      insert: element.insert.slice(startOffset, endOffset),
+    });
+    currentOffset += elementLength;
+  }
+
+  return sliced;
+}
+
+
+/**
+ * 
+ * @param {any} delta 
+ * @returns {any}
+ */
+function normalizeInsertDelta(delta) {
+  const normalized = [];
+
+  for (const element of delta) {
+    if (typeof element.insert === 'string' && element.insert.length === 0) {
+      continue;
+    }
+
+    const prev = normalized[normalized.length - 1];
+    if (
+      !prev ||
+      typeof prev.insert !== 'string' ||
+      typeof element.insert !== 'string'
+    ) {
+      normalized.push(element);
+      continue;
+    }
+
+    const merge =
+      prev.attributes === element.attributes ||
+      (!prev.attributes === !element.attributes &&
+        deepEquals(prev.attributes ?? {}, element.attributes ?? {}));
+
+    if (merge) {
+      prev.insert += element.insert;
+      continue;
+    }
+
+    normalized.push(element);
+  }
+
+  return normalized;
+}
+
+/**
+ * 
+ * @param {Y.XmlText} yText 
+ * @returns {any}
+ */
+function yTextToInsertDelta(yText) {
+  return normalizeInsertDelta(yText.toDelta());
+}
+
+/**
+ * 
+ * @param {any} delta 
+ * @returns {any}
+ */
+function cloneInsertDeltaDeep(delta) {
+  return delta.map((element) => {
+    if (typeof element.insert === 'string') {
+      return element;
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-use-before-define
+    return { ...element, insert: cloneDeep(element.insert) };
+  });
+}
+
+/**
+ * 
+ * @param {Y.XmlText} yText 
+ * @returns {Y.XmlText}
+ */
+function cloneDeep(yText) {
+  const clone = new Y.XmlText();
+
+  const attributes = yText.getAttributes();
+  Object.entries(attributes).forEach(([key, value]) => {
+    clone.setAttribute(key, value);
+  });
+
+  clone.applyDelta(cloneInsertDeltaDeep(yTextToInsertDelta(yText)), {
+    sanitize: false,
+  });
+
+  return clone;
+}
+
+/**
+ * 
+ * @param {Y.XmlText} xml 
+ */
+const xmlToString = (xml) => {
+  let str = '<node'
+  Object.entries(xml.getAttributes()).forEach(([key, value]) => {
+    str += ` ${key}="${value}"`
+  });
+  str += '>'
+  xml.toDelta().forEach(delta => {
+    const value = delta.insert;
+    if (!value) return;
+
+    if (typeof value === 'string') {
+      str += value;
+    }
+    else if (value instanceof Y.XmlText) {
+      str += xmlToString(value)
+    }
+  })
+
+  str+='</node>'
+  return str;
+}
+
+export const testSlateUndoBug = tc => {
+  const origin = 'origin'
+  const doc = new Y.Doc()
+  /**
+   * @type {Y.XmlText}
+   */
+  let xml;
+  xml = doc.get('xmlText', Y.XmlText);
+  const undoManager = new Y.UndoManager(xml, {
+    trackedOrigins: new Set([origin])
+  })
+
+  const remoteDoc = new Y.Doc();
+
+
+  const paragraph = new Y.XmlText();
+  doc.transact(() => {
+    paragraph.setAttribute('type', 'paragraph');
+
+
+    paragraph.applyDelta([{insert: '>hello'}]);
+    xml.insertEmbed(0, paragraph);
+  }, origin);
+
+  Y.applyUpdate(remoteDoc, Y.encodeStateAsUpdate(doc));
+  
+  let str = '<node><node type="paragraph">>hello</node></node>'
+  t.compare(xmlToString(xml), str);
+  t.compare(xmlToString(remoteDoc.get('xmlText', Y.XmlText)), str);
+  
+  undoManager.stopCapturing();
+  
+  //Convert to block quote
+  doc.transact(() => {
+    paragraph.applyDelta([{ delete: 1}]);
+    paragraph.setAttribute('type', 'block-quote-element');
+
+    //wrapping operation
+    const bq = new Y.XmlText();
+    bq.setAttribute('type', 'block-quote');
+
+    xml.applyDelta([{ retain: 1 }, { insert: bq }]);
+    const cloned = cloneInsertDeltaDeep(sliceInsertDelta(yTextToInsertDelta(xml), 0, 1));
+    
+    xml.delete(0, 1);
+    bq.applyDelta([...cloned])
+  }, origin);
+
+  Y.applyUpdate(remoteDoc, Y.encodeStateAsUpdate(doc));
+  
+  str = '<node><node type="block-quote"><node type="block-quote-element">hello</node></node></node>'
+  t.compare(xmlToString(xml), str);
+  t.compare(xmlToString(remoteDoc.get('xmlText', Y.XmlText)), str);
+  
+  undoManager.undo();
+  Y.applyUpdate(remoteDoc, Y.encodeStateAsUpdate(doc));
+  
+  str = '<node><node type="paragraph">>hello</node></node>'
+  t.compare(xmlToString(xml), str);
+  //This fails as our doc and remote doc are now out of sync!!
+  t.compare(xmlToString(remoteDoc.get('xmlText', Y.XmlText)), str);
 }
 
 /**
