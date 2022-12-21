@@ -500,28 +500,28 @@ export const testUndoXmlBug = tc => {
  * 
  * @param {Y.XmlText} xml 
  */
-const xmlToString = (xml) => {
-  let str = '<node'
-  Object.entries(xml.getAttributes()).forEach(([key, value]) => {
-    str += ` ${key}="${value}"`
-  });
-  str += '>'
-  //@ts-ignore
-  xml.toDelta().forEach(delta => {
-    const value = delta.insert;
-    if (!value) return;
+const xmlToString = (xml, isEditor = true) => {
+	const nodeName = isEditor ? "editor" : xml.getAttribute("type") ?? "node";
+	let str = "<" + nodeName;
+	Object.entries(xml.getAttributes()).forEach(([key, value]) => {
+		if (key !== "type") str += ` ${key}="${value}"`;
+	});
+	str += ">";
+	//@ts-ignore
+	xml.toDelta().forEach((delta) => {
+		const value = delta.insert;
+		if (!value) return;
 
-    if (typeof value === 'string') {
-      str += value;
-    }
-    else if (value instanceof Y.XmlText) {
-      str += xmlToString(value)
-    }
-  })
+		if (typeof value === "string") {
+			str += value;
+		} else if (value instanceof Y.XmlText) {
+			str += xmlToString(value, false);
+		}
+	});
 
-  str+='</node>'
-  return str;
-}
+	str += `</${nodeName}>`;
+	return str;
+};
 
 /**
  * 
@@ -529,74 +529,61 @@ const xmlToString = (xml) => {
  */
 export const testSlateUndoBug = (tc) => {
 	const origin = "origin";
+	const origin2 = "origin2";
 	const doc = new Y.Doc();
 	const remoteDoc = new Y.Doc();
 	/**
 	 * @type {Y.XmlText}
 	 */
-  //@ts-ignore
-	let xml = doc.get("xmlText", Y.XmlText);
+	//@ts-ignore
+	const xml = doc.get("xmlText", Y.XmlText);
+	/**
+	 * @type {Y.XmlText}
+	 */
+	//@ts-ignore
+	const remoteXml = remoteDoc.get("xmlText", Y.XmlText);
 	const undoManager = new Y.UndoManager(xml, {
-		trackedOrigins: new Set([origin]),
+		trackedOrigins: new Set([origin, origin2]),
 	});
 
-	const paragraph = new Y.XmlText();
+	const childElement = new Y.XmlText();
 	doc.transact(() => {
-		paragraph.setAttribute("type", "paragraph");
+		childElement.setAttribute("type", "some-type");
 
-		paragraph.applyDelta([{ insert: "some text" }]);
-		xml.insertEmbed(0, paragraph);
+		childElement.applyDelta([{ insert: "some text" }]);
+		xml.insertEmbed(0, childElement);
 	}, origin);
 
 	Y.applyUpdate(remoteDoc, Y.encodeStateAsUpdate(doc));
 
-	let str = '<node><node type="paragraph">some text</node></node>';
+	let str = "<editor><some-type>some text</some-type></editor>";
 	t.compare(xmlToString(xml), str);
-	//@ts-ignore
-  t.compare(xmlToString(remoteDoc.get("xmlText", Y.XmlText)), str);
+	t.compare(xmlToString(remoteXml), str);
 
 	undoManager.stopCapturing();
-
-	//Convert to block quote
 	doc.transact(() => {
-		paragraph.applyDelta([{ delete: 1 }]);
-    // When this line is commented out,
-    // the test passes
-		paragraph.setAttribute("type", "block-quote-element");
-
-		//wrapping operation
-		//Slate performs a wrap by inserting the new node after the wrapped node,
-		// and then moving the wrapped node inside the new node
-		const bq = new Y.XmlText();
-		bq.setAttribute("type", "block-quote");
-		xml.applyDelta([{ retain: 1 }, { insert: bq }]);
-
-		// This is the move op defined by slate yjs (delete + insert)
+		childElement.setAttribute("type", "some-other-type");
+	}, origin);
+	doc.transact(() => {
 		xml.delete(0, 1);
-		// slate-yjs clones the moved element, but since we know it was a bqe with hello text
-		// we can simply create a new xml text
-		const newBQEl = new Y.XmlText("some text");
-		newBQEl.setAttribute("type", "block-quote-element");
-		bq.applyDelta([{ insert: newBQEl }]);
 	}, origin);
 
 	Y.applyUpdate(remoteDoc, Y.encodeStateAsUpdate(doc));
 
-	str =
-		'<node><node type="block-quote"><node type="block-quote-element">some text</node></node></node>';
+	str = "<editor></editor>";
 	t.compare(xmlToString(xml), str);
-  //@ts-ignore
-	t.compare(xmlToString(remoteDoc.get("xmlText", Y.XmlText)), str);
-  
+	t.compare(xmlToString(remoteXml), str);
+
 	undoManager.undo();
 	Y.applyUpdate(remoteDoc, Y.encodeStateAsUpdate(doc));
-  
-	str = '<node><node type="paragraph">some text</node></node>';
+
+	str = "<editor><some-type>some text</some-type></editor>";
 	t.compare(xmlToString(xml), str);
 	// This fails as our doc and remote doc are now out of sync!!
-  // The remote doc now has a node with no "type" attribute
-  //@ts-ignore
-	t.compare(xmlToString(remoteDoc.get("xmlText", Y.XmlText)), str);
+	// The remote doc now has a node with no "type" attribute
+	//@ts-ignore
+	t.compare(xmlToString(remoteXml), str);
+	t.compare(xmlToString(remoteXml), xmlToString(xml));
 };
 
 /**
